@@ -1,0 +1,126 @@
+version: "3.9"
+
+# ============================================================
+#  Contractor Lead Machine — Docker Compose
+#  Runs: PostgreSQL + Redis + Backend API + Frontend (Next.js)
+#
+#  Usage:
+#    docker compose up            # start all services
+#    docker compose up -d         # start in background
+#    docker compose down          # stop all services
+#    docker compose down -v       # stop + delete data volumes
+#    docker compose logs -f api   # tail backend logs
+# ============================================================
+
+services:
+
+  # ── PostgreSQL Database ────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: clm_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: clm_dev_password
+      POSTGRES_DB: contractor_leads
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./backend/src/db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (follow-up job queue) ────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: clm_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend API (Node/Express) ─────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: clm_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      DATABASE_URL: postgresql://postgres:clm_dev_password@db:5432/contractor_leads
+      REDIS_URL: redis://redis:6379
+      FRONTEND_URL: http://localhost:3000
+      # ⚠️ Fill these in — or create a .env file and use env_file below
+      JWT_SECRET: ${JWT_SECRET}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      STRIPE_PRICE_STARTER: ${STRIPE_PRICE_STARTER}
+      STRIPE_PRICE_PRO: ${STRIPE_PRICE_PRO}
+      STRIPE_PRICE_AGENCY: ${STRIPE_PRICE_AGENCY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY}
+      EMAIL_FROM: ${EMAIL_FROM}
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    command: npm run dev
+
+  # ── Frontend (Next.js) ────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: clm_frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+
+  # ── Stripe CLI (optional: local webhook forwarding) ────────
+  # Uncomment to test Stripe webhooks locally without ngrok
+  #
+  # stripe-cli:
+  #   image: stripe/stripe-cli:latest
+  #   container_name: clm_stripe
+  #   command: listen --forward-to api:4000/api/webhooks/stripe
+  #   environment:
+  #     STRIPE_API_KEY: ${STRIPE_SECRET_KEY}
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  default:
+    name: clm_network
